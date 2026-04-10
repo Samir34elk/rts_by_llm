@@ -17,21 +17,43 @@ import java.util.*;
 import java.util.stream.Stream;
 
 /**
- * Resolves the mapping between test methods and the production code elements they cover.
+ * Resolves the mapping between test methods/step definitions and the production code
+ * elements they cover.
  *
- * <p>Coverage is inferred statically using three heuristics (in priority order):
+ * <p>Supports two test frameworks detected via annotations:
+ * <ul>
+ *   <li><b>JUnit 5</b> — methods annotated with {@code @Test}</li>
+ *   <li><b>Cucumber</b> — methods annotated with {@code @Given}, {@code @When},
+ *       {@code @Then}, {@code @And}, {@code @But}; the whole step class is treated
+ *       as a single logical test unit</li>
+ * </ul>
+ *
+ * <p>Coverage is inferred statically via two heuristics:
  * <ol>
- *   <li>Import-based: a test imports {@code com.example.Foo} → covers {@code com.example.Foo}</li>
- *   <li>Naming convention: {@code FooTest} → covers {@code com.example.Foo}</li>
- *   <li>Annotation: class or method is annotated with {@code @Test} (JUnit 5)</li>
+ *   <li>Import-based: non-framework imports → covered production classes</li>
+ *   <li>Naming convention: {@code FooSteps}/{@code FooTest} → covers {@code Foo}</li>
  * </ol>
  */
 public class TestMappingResolver implements TestDiscovery {
 
     private static final Logger log = LoggerFactory.getLogger(TestMappingResolver.class);
 
-    private static final String TEST_ANNOTATION = "Test";
-    private static final String[] TEST_PATTERNS = {"Test", "Tests", "Spec", "IT"};
+    /** JUnit 5 test method annotation. */
+    private static final String JUNIT_TEST = "Test";
+
+    /** Cucumber step annotations (any of these makes a method a step definition). */
+    private static final Set<String> CUCUMBER_STEP_ANNOTATIONS =
+            Set.of("Given", "When", "Then", "And", "But");
+
+    /** Class name suffixes/prefixes that mark a class as test-related. */
+    private static final String[] TEST_PATTERNS = {"Test", "Tests", "Spec", "IT", "Steps", "StepDefs", "StepDefinitions"};
+
+    /** Imports that belong to test/utility frameworks and should not be counted as coverage. */
+    private static final Set<String> FRAMEWORK_PREFIXES = Set.of(
+            "org.junit", "java.", "javax.", "org.assertj", "org.mockito",
+            "io.cucumber", "io.github.bonigarcia", "org.openqa.selenium",
+            "org.slf4j", "com.fasterxml.jackson"
+    );
 
     private final JavaParser parser;
 
@@ -61,14 +83,15 @@ public class TestMappingResolver implements TestDiscovery {
         } catch (IOException e) {
             log.warn("Cannot walk test directory {}: {}", testRoot, e.getMessage());
         }
+        log.info("Discovered {} test cases under {}", tests.size(), testRoot);
         return tests;
     }
 
     /**
-     * Extracts test cases from a single Java source file provided as a path.
+     * Extracts test cases from a single Java source file.
      *
      * @param sourceFile path to a {@code .java} file
-     * @return test cases found in the file; empty if the file is not a test class
+     * @return test cases found; empty if the file is not a test/step class
      */
     public List<TestCase> extractTestCases(Path sourceFile) {
         try {
@@ -90,8 +113,7 @@ public class TestMappingResolver implements TestDiscovery {
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
             return List.of();
         }
-        CompilationUnit cu = result.getResult().get();
-        return extractFromCu(cu);
+        return extractFromCu(result.getResult().get());
     }
 
     // -------------------------------------------------------------------------
@@ -112,65 +134,99 @@ public class TestMappingResolver implements TestDiscovery {
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
             String className = packageName + decl.getNameAsString();
-
-            // Determine covered production class via naming convention
             Set<String> classLevelCoverage = inferCoveredClasses(decl.getNameAsString(), importedClasses, packageName);
 
-            // Extract test methods (annotated with @Test)
-            List<MethodDeclaration> testMethods = decl.getMethods().stream()
-                    .filter(m -> m.getAnnotations().stream()
-                            .anyMatch(a -> a.getNameAsString().equals(TEST_ANNOTATION)))
-                    .toList();
-
-            if (testMethods.isEmpty()) {
-                return; // not a test class
+            List<TestCase> extracted = extractJUnit(decl, className, classLevelCoverage, importedClasses);
+            if (!extracted.isEmpty()) {
+                results.addAll(extracted);
+                return;
             }
 
-            for (MethodDeclaration method : testMethods) {
-                Set<String> coveredElements = new HashSet<>(classLevelCoverage);
-                // Also add imports used by the method's parameter/return types
-                coveredElements.addAll(inferMethodCoverage(method, importedClasses));
-                results.add(new TestCase(className, method.getNameAsString(), Set.copyOf(coveredElements)));
-            }
+            // Try Cucumber step class
+            extracted = extractCucumberSteps(decl, className, classLevelCoverage);
+            results.addAll(extracted);
         });
 
         return results;
     }
 
-    private Set<String> inferCoveredClasses(String testClassName, Set<String> imports, String packageName) {
+    /**
+     * Extracts JUnit 5 test methods (annotated with {@code @Test}).
+     */
+    private List<TestCase> extractJUnit(ClassOrInterfaceDeclaration decl,
+                                         String className,
+                                         Set<String> classLevelCoverage,
+                                         Set<String> importedClasses) {
+        List<MethodDeclaration> testMethods = decl.getMethods().stream()
+                .filter(m -> m.getAnnotations().stream()
+                        .anyMatch(a -> a.getNameAsString().equals(JUNIT_TEST)))
+                .toList();
+
+        if (testMethods.isEmpty()) {
+            return List.of();
+        }
+
+        List<TestCase> results = new ArrayList<>();
+        for (MethodDeclaration method : testMethods) {
+            Set<String> covered = new HashSet<>(classLevelCoverage);
+            results.add(new TestCase(className, method.getNameAsString(), Set.copyOf(covered)));
+        }
+        return results;
+    }
+
+    /**
+     * Extracts Cucumber step definitions.
+     *
+     * <p>Each step method ({@code @Given/@When/@Then/@And/@But}) is surfaced as a
+     * {@link TestCase}. If no step methods exist the class is not considered a test.
+     */
+    private List<TestCase> extractCucumberSteps(ClassOrInterfaceDeclaration decl,
+                                                 String className,
+                                                 Set<String> classLevelCoverage) {
+        List<MethodDeclaration> stepMethods = decl.getMethods().stream()
+                .filter(m -> m.getAnnotations().stream()
+                        .anyMatch(a -> CUCUMBER_STEP_ANNOTATIONS.contains(a.getNameAsString())))
+                .toList();
+
+        if (stepMethods.isEmpty()) {
+            return List.of();
+        }
+
+        List<TestCase> results = new ArrayList<>();
+        for (MethodDeclaration method : stepMethods) {
+            results.add(new TestCase(className, method.getNameAsString(), Set.copyOf(classLevelCoverage)));
+        }
+        return results;
+    }
+
+    private Set<String> inferCoveredClasses(String className, Set<String> imports, String packageName) {
         Set<String> covered = new HashSet<>();
 
-        // Heuristic 1: strip test suffix to derive production class name
-        String productionSimpleName = stripTestSuffix(testClassName);
+        // Heuristic 1: strip test/step suffix → derive likely production class name
+        String productionSimpleName = stripTestSuffix(className);
         if (productionSimpleName != null) {
-            // Look in imports first
             for (String imp : imports) {
                 if (imp.endsWith("." + productionSimpleName)) {
                     covered.add(imp);
                     break;
                 }
             }
-            // Also try same package
             if (!packageName.isEmpty()) {
-                String candidate = packageName.replace(".test.", ".") + productionSimpleName;
-                covered.add(candidate);
+                // Map test package back to main package
+                String mainPkg = packageName
+                        .replace(".test.", ".")
+                        .replace(".steps.", ".")
+                        .replace(".stepdefs.", ".");
+                covered.add(mainPkg + productionSimpleName);
             }
         }
 
-        // Heuristic 2: all non-JUnit, non-java imports are potential subjects
+        // Heuristic 2: all non-framework imports are potential production subjects
         imports.stream()
-                .filter(imp -> !imp.startsWith("org.junit")
-                        && !imp.startsWith("java.")
-                        && !imp.startsWith("org.assertj")
-                        && !imp.startsWith("org.mockito"))
+                .filter(imp -> FRAMEWORK_PREFIXES.stream().noneMatch(imp::startsWith))
                 .forEach(covered::add);
 
         return covered;
-    }
-
-    private Set<String> inferMethodCoverage(MethodDeclaration method, Set<String> imports) {
-        // For now, method-level coverage inherits from class level (imports already handled above)
-        return Set.of();
     }
 
     private String stripTestSuffix(String name) {
