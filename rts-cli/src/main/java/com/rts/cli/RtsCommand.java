@@ -6,6 +6,7 @@ import com.rts.analyzer.DependencyGraphBuilder;
 import com.rts.analyzer.JavaAstAnalyzer;
 import com.rts.analyzer.TestMappingResolver;
 import com.rts.change.ChangeImpactAnalyzer;
+import com.rts.change.GitCloneHelper;
 import com.rts.change.JGitDiffParser;
 import com.rts.core.model.*;
 import com.rts.core.spi.LlmClient;
@@ -31,9 +32,12 @@ import java.util.concurrent.Callable;
  *
  * <p>Provides two sub-commands:
  * <ul>
- *   <li>{@code analyze} — builds and prints the dependency graph for a project</li>
- *   <li>{@code select} — selects tests impacted by a git diff or file list</li>
+ *   <li>{@code analyze} — builds and prints the dependency graph / test inventory</li>
+ *   <li>{@code select} — selects tests impacted by a git diff or a list of changed files</li>
  * </ul>
+ *
+ * <p>Both sub-commands accept either a local {@code --project} path or a remote
+ * {@code --url} pointing to a Git repository that will be cloned automatically.
  */
 @Command(
         name = "rts",
@@ -62,30 +66,57 @@ public class RtsCommand implements Callable<Integer> {
     // analyze sub-command
     // =========================================================================
 
-    @Command(name = "analyze", description = "Analyze a Java project and output its dependency graph.")
+    @Command(name = "analyze",
+             description = "Analyze a Java project and output its dependency graph and test inventory.")
     static class AnalyzeCommand implements Callable<Integer> {
 
         private static final Logger log = LoggerFactory.getLogger(AnalyzeCommand.class);
 
-        @Parameters(index = "0", description = "Path to the Java project root")
+        @Parameters(index = "0", description = "Path to the Java project root", arity = "0..1")
         private Path projectPath;
 
-        @Option(names = {"--output", "-o"}, description = "Output file for the graph summary (default: stdout)")
+        @Option(names = {"--url", "-u"},
+                description = "Remote Git URL to clone and analyze (alternative to project path)")
+        private String gitUrl;
+
+        @Option(names = {"--branch", "-b"},
+                description = "Branch to checkout when using --url (default: repository default branch)")
+        private String branch;
+
+        @Option(names = {"--output", "-o"}, description = "Output file (default: stdout)")
         private Path outputFile;
 
         @Override
         public Integer call() throws Exception {
-            log.info("Analyzing project: {}", projectPath);
+            if (gitUrl != null) {
+                try (GitCloneHelper clone = GitCloneHelper.clone(gitUrl, branch)) {
+                    return runAnalysis(clone.getRepoRoot(), gitUrl, clone.getHeadCommit());
+                }
+            }
+            if (projectPath == null) {
+                System.err.println("Error: provide a project path or --url <git-url>");
+                return 1;
+            }
+            return runAnalysis(projectPath, null, null);
+        }
+
+        private int runAnalysis(Path root, String remoteUrl, String headCommit) throws Exception {
+            log.info("Analyzing project: {}", root);
 
             JavaAstAnalyzer astAnalyzer = new JavaAstAnalyzer();
             DependencyGraphBuilder builder = new DependencyGraphBuilder(astAnalyzer);
-            DependencyGraph graph = builder.buildFromProject(projectPath);
+            DependencyGraph graph = builder.buildFromProject(root);
 
             TestMappingResolver testResolver = new TestMappingResolver();
-            List<TestCase> tests = testResolver.discoverTests(projectPath);
+            List<TestCase> tests = testResolver.discoverTests(root);
 
             Map<String, Object> output = new LinkedHashMap<>();
-            output.put("projectPath", projectPath.toAbsolutePath().toString());
+            if (remoteUrl != null) {
+                output.put("remoteUrl", remoteUrl);
+                output.put("headCommit", headCommit);
+            } else {
+                output.put("projectPath", root.toAbsolutePath().toString());
+            }
             output.put("totalElements", graph.size());
             output.put("discoveredTests", tests.size());
 
@@ -99,8 +130,9 @@ public class RtsCommand implements Callable<Integer> {
             }
             output.put("tests", testList);
 
-            ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
-            String json = mapper.writeValueAsString(output);
+            String json = new ObjectMapper()
+                    .enable(SerializationFeature.INDENT_OUTPUT)
+                    .writeValueAsString(output);
 
             if (outputFile != null) {
                 java.nio.file.Files.writeString(outputFile, json);
@@ -121,16 +153,28 @@ public class RtsCommand implements Callable<Integer> {
 
         private static final Logger log = LoggerFactory.getLogger(SelectCommand.class);
 
-        @Option(names = {"--project", "-p"}, required = true, description = "Path to the Java project root")
+        @Option(names = {"--project", "-p"},
+                description = "Path to the local Java project root")
         private Path projectPath;
 
-        @Option(names = {"--diff"}, description = "Git diff range, e.g. HEAD~1..HEAD")
+        @Option(names = {"--url", "-u"},
+                description = "Remote Git URL to clone and analyze (alternative to --project)")
+        private String gitUrl;
+
+        @Option(names = {"--branch", "-b"},
+                description = "Branch to checkout when using --url (default: repository default branch)")
+        private String branch;
+
+        @Option(names = {"--diff"},
+                description = "Git diff range, e.g. HEAD~1..HEAD (requires a local project or cloned repo with history)")
         private String diffRange;
 
-        @Option(names = {"--changed-files"}, description = "Comma-separated list of changed files")
+        @Option(names = {"--changed-files"},
+                description = "Comma-separated list of changed file paths relative to the project root")
         private String changedFiles;
 
-        @Option(names = {"--mode"}, description = "Selection mode: static or hybrid (default: static)")
+        @Option(names = {"--mode"},
+                description = "Selection mode: static or hybrid (default: static)")
         private String mode = "static";
 
         @Option(names = {"--output", "-o"}, description = "Output file (default: stdout)")
@@ -138,22 +182,35 @@ public class RtsCommand implements Callable<Integer> {
 
         @Override
         public Integer call() throws Exception {
+            if (gitUrl != null) {
+                try (GitCloneHelper clone = GitCloneHelper.clone(gitUrl, branch)) {
+                    return runSelection(clone.getRepoRoot(), gitUrl, clone.getHeadCommit());
+                }
+            }
+            if (projectPath == null) {
+                System.err.println("Error: provide --project <path> or --url <git-url>");
+                return 1;
+            }
+            return runSelection(projectPath, null, null);
+        }
+
+        private int runSelection(Path root, String remoteUrl, String headCommit) throws Exception {
             if (diffRange == null && changedFiles == null) {
-                System.err.println("Error: provide --diff or --changed-files");
+                System.err.println("Error: provide --diff <range> or --changed-files <files>");
                 return 1;
             }
 
-            RtsConfig config = RtsConfig.load(projectPath);
+            RtsConfig config = RtsConfig.load(root);
             log.info("Mode: {}, LLM enabled: {}", mode, config.getLlm().isEnabled());
 
             // Build dependency graph
             JavaAstAnalyzer astAnalyzer = new JavaAstAnalyzer();
             DependencyGraphBuilder graphBuilder = new DependencyGraphBuilder(astAnalyzer);
-            DependencyGraph graph = graphBuilder.buildFromProject(projectPath);
+            DependencyGraph graph = graphBuilder.buildFromProject(root);
 
             // Discover tests
             TestMappingResolver testResolver = new TestMappingResolver();
-            List<TestCase> allTests = testResolver.discoverTests(projectPath);
+            List<TestCase> allTests = testResolver.discoverTests(root);
             log.info("Discovered {} tests", allTests.size());
 
             // Parse changes
@@ -163,12 +220,10 @@ public class RtsCommand implements Callable<Integer> {
                 String[] parts = diffRange.split("\\.\\.", 2);
                 String from = parts[0].trim();
                 String to = parts.length > 1 ? parts[1].trim() : "HEAD";
-                changes = diffParser.parseChanges(projectPath, from, to);
+                changes = diffParser.parseChanges(root, from, to);
             } else {
                 List<String> files = Arrays.asList(changedFiles.split(","));
-                changes = diffParser.parseChangedFiles(projectPath, files.stream()
-                        .map(String::trim)
-                        .toList());
+                changes = diffParser.parseChangedFiles(root, files.stream().map(String::trim).toList());
             }
             log.info("Detected {} changes", changes.size());
 
@@ -187,8 +242,7 @@ public class RtsCommand implements Callable<Integer> {
                 result = staticSelector.select(graph, changes, allTests);
             }
 
-            // Serialize output
-            String json = serializeResult(result, changes);
+            String json = serializeResult(result, changes, remoteUrl, headCommit);
             if (outputFile != null) {
                 java.nio.file.Files.writeString(outputFile, json);
                 System.out.println("Result written to " + outputFile);
@@ -201,17 +255,19 @@ public class RtsCommand implements Callable<Integer> {
         private LlmClient buildLlmClient(RtsConfig config) {
             RtsConfig.LlmConfig llm = config.getLlm();
             return new OpenAiLlmClient(
-                    llm.getEndpoint(),
-                    llm.getApiKey(),
-                    llm.getModel(),
-                    llm.getMaxTokens(),
-                    llm.getTemperature()
-            );
+                    llm.getEndpoint(), llm.getApiKey(), llm.getModel(),
+                    llm.getMaxTokens(), llm.getTemperature());
         }
 
-        private String serializeResult(SelectionResult result, List<ChangeInfo> changes) throws Exception {
+        private String serializeResult(SelectionResult result, List<ChangeInfo> changes,
+                                        String remoteUrl, String headCommit) throws Exception {
             ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
             Map<String, Object> output = new LinkedHashMap<>();
+
+            if (remoteUrl != null) {
+                output.put("remoteUrl", remoteUrl);
+                output.put("headCommit", headCommit);
+            }
             output.put("source", result.source().name());
             output.put("selectedTestCount", result.selectedTests().size());
 
