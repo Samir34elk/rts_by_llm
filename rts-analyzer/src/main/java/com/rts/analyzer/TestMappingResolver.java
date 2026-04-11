@@ -28,15 +28,21 @@ import java.util.stream.Stream;
  *       as a single logical test unit</li>
  * </ul>
  *
- * <p>Coverage is inferred statically via two heuristics:
+ * <p>Coverage resolution (best-effort, in order):
  * <ol>
- *   <li>Import-based: non-framework imports → covered production classes</li>
- *   <li>Naming convention: {@code FooSteps}/{@code FooTest} → covers {@code Foo}</li>
+ *   <li><b>JaCoCo XML report</b> — if a {@code jacocoTestReport.xml} (Gradle) or
+ *       {@code jacoco.xml} (Maven) is found in the project's build output, exact
+ *       method-level FQNs ({@code com.example.Foo#bar}) are derived from the report.
+ *       Only methods with at least one covered instruction are included.</li>
+ *   <li><b>Static heuristic fallback</b> — import-based and naming-convention inference
+ *       when no JaCoCo report is available.</li>
  * </ol>
  */
 public class TestMappingResolver implements TestDiscovery {
 
     private static final Logger log = LoggerFactory.getLogger(TestMappingResolver.class);
+
+    private final JacocoReportParser jacocoParser;
 
     /** JUnit 5 test method annotation. */
     private static final String JUNIT_TEST = "Test";
@@ -60,10 +66,15 @@ public class TestMappingResolver implements TestDiscovery {
     /** Creates a resolver with a default {@link JavaParser} configuration. */
     public TestMappingResolver() {
         this.parser = new JavaParser();
+        this.jacocoParser = new JacocoReportParser();
     }
 
     /**
      * Discovers all test cases under {@code src/test/} within the given project root.
+     *
+     * <p>Automatically detects a JaCoCo XML report in the project's build output and,
+     * when found, uses it to populate {@code coveredElements} with exact method-level FQNs
+     * ({@code com.example.Foo#bar}) instead of the coarse static heuristic.
      *
      * @param projectRoot root directory of the project
      * @return list of test cases with inferred coverage; never {@code null}
@@ -76,10 +87,21 @@ public class TestMappingResolver implements TestDiscovery {
             return List.of();
         }
 
+        // Load JaCoCo coverage data if available — enables method-level precision
+        Map<String, Set<String>> jacocoCoverage = jacocoParser.findReport(projectRoot)
+                .map(jacocoParser::parse)
+                .orElse(Map.of());
+
+        if (!jacocoCoverage.isEmpty()) {
+            log.info("Using JaCoCo coverage data: {} classes with method-level coverage", jacocoCoverage.size());
+        } else {
+            log.info("No JaCoCo report found — falling back to static heuristic for coverage inference");
+        }
+
         List<TestCase> tests = new ArrayList<>();
         try (Stream<Path> stream = Files.walk(testRoot)) {
             stream.filter(p -> p.toString().endsWith(".java"))
-                    .forEach(file -> tests.addAll(extractTestCases(file)));
+                    .forEach(file -> tests.addAll(extractTestCases(file, jacocoCoverage)));
         } catch (IOException e) {
             log.warn("Cannot walk test directory {}: {}", testRoot, e.getMessage());
         }
@@ -88,14 +110,27 @@ public class TestMappingResolver implements TestDiscovery {
     }
 
     /**
-     * Extracts test cases from a single Java source file.
+     * Extracts test cases from a single Java source file using the static heuristic.
      *
      * @param sourceFile path to a {@code .java} file
      * @return test cases found; empty if the file is not a test/step class
      */
     public List<TestCase> extractTestCases(Path sourceFile) {
+        return extractTestCases(sourceFile, Map.of());
+    }
+
+    /**
+     * Extracts test cases from a single Java source file, enriching coverage with JaCoCo
+     * data when provided.
+     *
+     * @param sourceFile     path to a {@code .java} file
+     * @param jacocoCoverage map from class FQN to set of covered method names; empty map
+     *                       triggers the static heuristic fallback
+     * @return test cases found; empty if the file is not a test/step class
+     */
+    public List<TestCase> extractTestCases(Path sourceFile, Map<String, Set<String>> jacocoCoverage) {
         try {
-            return extractTestCases(Files.readString(sourceFile));
+            return extractTestCases(Files.readString(sourceFile), jacocoCoverage);
         } catch (IOException e) {
             log.warn("Cannot read test file {}: {}", sourceFile, e.getMessage());
             return List.of();
@@ -103,22 +138,34 @@ public class TestMappingResolver implements TestDiscovery {
     }
 
     /**
-     * Extracts test cases from a raw Java source snippet.
+     * Extracts test cases from a raw Java source snippet (static heuristic only).
      *
      * @param source Java source code
      * @return test cases found; empty if none detected
      */
     public List<TestCase> extractTestCases(String source) {
+        return extractTestCases(source, Map.of());
+    }
+
+    /**
+     * Extracts test cases from a raw Java source snippet, enriching coverage with JaCoCo
+     * data when provided.
+     *
+     * @param source         Java source code
+     * @param jacocoCoverage map from class FQN to set of covered method names
+     * @return test cases found; empty if none detected
+     */
+    public List<TestCase> extractTestCases(String source, Map<String, Set<String>> jacocoCoverage) {
         ParseResult<CompilationUnit> result = parser.parse(source);
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
             return List.of();
         }
-        return extractFromCu(result.getResult().get());
+        return extractFromCu(result.getResult().get(), jacocoCoverage);
     }
 
     // -------------------------------------------------------------------------
 
-    private List<TestCase> extractFromCu(CompilationUnit cu) {
+    private List<TestCase> extractFromCu(CompilationUnit cu, Map<String, Set<String>> jacocoCoverage) {
         String packageName = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString() + ".")
                 .orElse("");
@@ -134,16 +181,17 @@ public class TestMappingResolver implements TestDiscovery {
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
             String className = packageName + decl.getNameAsString();
-            Set<String> classLevelCoverage = inferCoveredClasses(decl.getNameAsString(), importedClasses, packageName);
+            Set<String> coverage = inferCoveredElements(
+                    decl.getNameAsString(), importedClasses, packageName, jacocoCoverage);
 
-            List<TestCase> extracted = extractJUnit(decl, className, classLevelCoverage, importedClasses);
+            List<TestCase> extracted = extractJUnit(decl, className, coverage, importedClasses);
             if (!extracted.isEmpty()) {
                 results.addAll(extracted);
                 return;
             }
 
             // Try Cucumber step class
-            extracted = extractCucumberSteps(decl, className, classLevelCoverage);
+            extracted = extractCucumberSteps(decl, className, coverage);
             results.addAll(extracted);
         });
 
@@ -199,7 +247,50 @@ public class TestMappingResolver implements TestDiscovery {
         return results;
     }
 
-    private Set<String> inferCoveredClasses(String className, Set<String> imports, String packageName) {
+    /**
+     * Resolves the set of production code elements covered by a test class.
+     *
+     * <p>When {@code jacocoCoverage} is non-empty, candidate production classes are
+     * resolved via the static heuristic and then enriched with exact method FQNs
+     * ({@code com.example.Foo#bar}) from the JaCoCo report.  Only methods with at least
+     * one covered instruction are included.  If a candidate class has no JaCoCo entry
+     * at all (e.g., not yet executed), the class-level FQN is kept as a conservative
+     * fallback so no test is silently dropped.
+     *
+     * <p>When {@code jacocoCoverage} is empty the method falls back to the static
+     * heuristic alone (class-level FQNs only).
+     */
+    private Set<String> inferCoveredElements(String className, Set<String> imports,
+                                              String packageName,
+                                              Map<String, Set<String>> jacocoCoverage) {
+        Set<String> candidateClasses = resolveCandidateClasses(className, imports, packageName);
+
+        if (jacocoCoverage.isEmpty()) {
+            // Static heuristic fallback — keep class-level FQNs
+            return candidateClasses;
+        }
+
+        // JaCoCo path — expand each candidate class to its covered method FQNs
+        Set<String> covered = new HashSet<>();
+        for (String cls : candidateClasses) {
+            Set<String> methods = jacocoCoverage.get(cls);
+            if (methods != null && !methods.isEmpty()) {
+                for (String method : methods) {
+                    covered.add(cls + "#" + method);
+                }
+            } else {
+                // Class not in JaCoCo report — keep class-level as safety net
+                covered.add(cls);
+            }
+        }
+        return covered;
+    }
+
+    /**
+     * Derives the set of candidate production class FQNs that a test class is likely
+     * to cover, using naming-convention and import-based heuristics.
+     */
+    private Set<String> resolveCandidateClasses(String className, Set<String> imports, String packageName) {
         Set<String> covered = new HashSet<>();
 
         // Heuristic 1: strip test/step suffix → derive likely production class name
