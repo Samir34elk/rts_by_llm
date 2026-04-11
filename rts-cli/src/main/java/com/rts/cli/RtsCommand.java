@@ -200,7 +200,13 @@ public class RtsCommand implements Callable<Integer> {
                 return 1;
             }
 
+            // --mode hybrid active le LLM même sans rts-config.yaml :
+            // les variables d'env RTS_LLM_* prennent le dessus sur le fichier.
+            boolean hybridRequested = "hybrid".equalsIgnoreCase(mode);
             RtsConfig config = RtsConfig.load(root);
+            if (hybridRequested) {
+                config.getLlm().setEnabled(true);
+            }
             log.info("Mode: {}, LLM enabled: {}", mode, config.getLlm().isEnabled());
 
             // Build dependency graph
@@ -232,12 +238,19 @@ public class RtsCommand implements Callable<Integer> {
             StaticSelector staticSelector = new StaticSelector(impactAnalyzer);
             SelectionResult result;
 
-            if ("hybrid".equalsIgnoreCase(mode) && config.getLlm().isEnabled()) {
+            if (hybridRequested) {
                 LlmClient llmClient = buildLlmClient(config);
-                LlmRefinementSelector llmSelector = new LlmRefinementSelector(
-                        llmClient, new PromptTemplates(), new LlmResponseParser());
-                HybridSelector hybrid = new HybridSelector(staticSelector, llmSelector, true);
-                result = hybrid.select(graph, changes, allTests);
+                if (!llmClient.isAvailable()) {
+                    System.err.println("⚠  LLM non configuré (endpoint ou modèle manquant) — " +
+                            "set RTS_LLM_ENDPOINT et RTS_LLM_MODEL, ou vérifiez rts-config.yaml. " +
+                            "Fallback sur le mode statique.");
+                    result = staticSelector.select(graph, changes, allTests);
+                } else {
+                    LlmRefinementSelector llmSelector = new LlmRefinementSelector(
+                            llmClient, new PromptTemplates(), new LlmResponseParser());
+                    HybridSelector hybrid = new HybridSelector(staticSelector, llmSelector, true);
+                    result = hybrid.select(graph, changes, allTests);
+                }
             } else {
                 result = staticSelector.select(graph, changes, allTests);
             }
