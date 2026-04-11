@@ -8,6 +8,7 @@ import com.rts.analyzer.TestMappingResolver;
 import com.rts.change.ChangeImpactAnalyzer;
 import com.rts.change.GitCloneHelper;
 import com.rts.change.JGitDiffParser;
+import com.rts.core.cache.GraphCache;
 import com.rts.core.model.*;
 import com.rts.core.spi.LlmClient;
 import com.rts.llm.LlmResponseParser;
@@ -105,7 +106,16 @@ public class RtsCommand implements Callable<Integer> {
 
             JavaAstAnalyzer astAnalyzer = new JavaAstAnalyzer();
             DependencyGraphBuilder builder = new DependencyGraphBuilder(astAnalyzer);
-            DependencyGraph graph = builder.buildFromProject(root);
+            GraphCache cache = new GraphCache(root);
+            DependencyGraph graph = cache.load().orElseGet(() -> {
+                try {
+                    DependencyGraph g = builder.buildFromProject(root);
+                    cache.save(g);
+                    return g;
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
 
             TestMappingResolver testResolver = new TestMappingResolver();
             List<TestCase> tests = testResolver.discoverTests(root);
@@ -209,10 +219,19 @@ public class RtsCommand implements Callable<Integer> {
             }
             log.info("Mode: {}, LLM enabled: {}", mode, config.getLlm().isEnabled());
 
-            // Build dependency graph
+            // Build dependency graph (with cache)
             JavaAstAnalyzer astAnalyzer = new JavaAstAnalyzer();
             DependencyGraphBuilder graphBuilder = new DependencyGraphBuilder(astAnalyzer);
-            DependencyGraph graph = graphBuilder.buildFromProject(root);
+            GraphCache cache = new GraphCache(root);
+            DependencyGraph graph = cache.load().orElseGet(() -> {
+                try {
+                    DependencyGraph g = graphBuilder.buildFromProject(root);
+                    cache.save(g);
+                    return g;
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
 
             // Discover tests
             TestMappingResolver testResolver = new TestMappingResolver();
