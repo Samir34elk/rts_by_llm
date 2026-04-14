@@ -43,7 +43,10 @@ public class OpenAiLlmClient implements LlmClient {
      * @param temperature sampling temperature (0.0 = deterministic)
      */
     public OpenAiLlmClient(String endpoint, String apiKey, String model, int maxTokens, double temperature) {
-        this.endpoint = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
+        // endpoint may be null when no config is provided — isAvailable() will return false
+        this.endpoint = (endpoint != null && endpoint.endsWith("/"))
+                ? endpoint.substring(0, endpoint.length() - 1)
+                : endpoint;
         this.apiKey = apiKey;
         this.model = model;
         this.maxTokens = maxTokens;
