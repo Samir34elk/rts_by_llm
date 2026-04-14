@@ -142,6 +142,7 @@ public class MultiModuleDetector {
      * <p>Handles:
      * <ul>
      *   <li>{@code include("module-a", "module-b")}</li>
+     *   <li>{@code include(":app", ":features:base")} (Android/Gradle style with leading colon)</li>
      *   <li>{@code include("parent:child")  →  parent/child/ directory}</li>
      *   <li>Multi-line {@code include(...)} blocks</li>
      * </ul>
@@ -150,12 +151,18 @@ public class MultiModuleDetector {
         try {
             String content = Files.readString(settingsFile);
 
-            // Extract all include(...) blocks (single-line and multi-line)
+            // KTS-style: include("a", "b") — with parentheses, single or multi-line
             Pattern includeBlock = Pattern.compile(
                     "include\\s*\\(([^)]+)\\)", Pattern.DOTALL);
-            // Also handle Groovy-style: include 'a', 'b'
+            // Groovy-style: include 'a', 'b' — without parentheses.
+            // Also handles multi-line continuation blocks like:
+            //   include ':app',
+            //           ':features:base',
+            //           ':features:repository'
+            // The negative lookahead (?!\\s*\\() skips include(...) already covered above.
             Pattern includeGroovy = Pattern.compile(
-                    "^\\s*include\\s+(.+)$", Pattern.MULTILINE);
+                    "\\binclude\\b(?!\\s*\\()((?:\\s+['\"][^'\"]+['\"]\\s*,?)+)",
+                    Pattern.DOTALL);
 
             List<String> moduleNames = new ArrayList<>();
             extractQuotedStrings(includeBlock.matcher(content), moduleNames);
@@ -169,9 +176,12 @@ public class MultiModuleDetector {
             modules.add(root);  // root may have shared sources
 
             for (String name : moduleNames) {
-                // Gradle uses ':' as path separator for nested projects
-                // "parent:child" → root/parent/child
-                String dirPath = name.replace(':', '/');
+                // Gradle uses ':' as path separator for nested projects.
+                // Strip the optional leading ':' first so that Android-style names
+                // like ":app" or ":features:base" become "app" and "features/base"
+                // instead of the absolute paths "/app" and "/features/base".
+                String dirPath = name.replaceFirst("^:", "").replace(':', '/');
+                if (dirPath.isEmpty()) continue;
                 Path modulePath = root.resolve(dirPath);
                 if (Files.isDirectory(modulePath)) {
                     modules.add(modulePath);

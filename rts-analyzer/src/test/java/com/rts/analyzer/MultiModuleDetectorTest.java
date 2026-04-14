@@ -131,6 +131,51 @@ class MultiModuleDetectorTest {
         assertThat(modules).contains(root.resolve("parent/child"));
     }
 
+    @Test
+    void detectModules_gradleGroovy_androidStyleLeadingColon(@TempDir Path root) throws Exception {
+        // Android projects use include ':app', ':features:base' (leading colon)
+        Files.createDirectories(root.resolve("app"));
+        Files.createDirectories(root.resolve("features/base"));
+        Files.createDirectories(root.resolve("features/repositories"));
+
+        Files.writeString(root.resolve("settings.gradle"), """
+                include ':app', ':features:base', ':features:repositories'
+                """);
+
+        List<Path> modules = detector.detectModules(root);
+        assertThat(modules).contains(
+                root.resolve("app"),
+                root.resolve("features/base"),
+                root.resolve("features/repositories")
+        );
+    }
+
+    @Test
+    void detectModules_gradleGroovy_multiLineIncludeWithoutParens(@TempDir Path root) throws Exception {
+        // Real-world Android format:
+        //   include ':app',
+        //           ':features:base',
+        //           ':features:repositories'
+        Files.createDirectories(root.resolve("app"));
+        Files.createDirectories(root.resolve("features/base"));
+        Files.createDirectories(root.resolve("features/repositories"));
+        Files.createDirectories(root.resolve("features/repository"));
+
+        Files.writeString(root.resolve("settings.gradle"),
+                "include ':app',\n" +
+                "        ':features:base',\n" +
+                "        ':features:repositories',\n" +
+                "        ':features:repository'\n");
+
+        List<Path> modules = detector.detectModules(root);
+        assertThat(modules).contains(
+                root.resolve("app"),
+                root.resolve("features/base"),
+                root.resolve("features/repositories"),
+                root.resolve("features/repository")
+        );
+    }
+
     // ── Gradle Groovy DSL ─────────────────────────────────────────────────────
 
     @Test
