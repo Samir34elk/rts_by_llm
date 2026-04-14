@@ -1,0 +1,76 @@
+{
+  "generatedAt" : "2026-04-14T11:36:00.247939210Z",
+  "elements" : [ {
+    "fqn" : "com.example.Calculator#multiply",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.int" ]
+  }, {
+    "fqn" : "com.example.StringUtilsTest#capitalize_firstLetterUppercase",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.CalculatorTest#multiply_returnsProduct",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.Calculator#divide",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.int", "com.example.double" ]
+  }, {
+    "fqn" : "com.example.StringUtils#reverse",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.String" ]
+  }, {
+    "fqn" : "com.example.CalculatorTest#subtract_returnsCorrectDifference",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.Calculator#subtract",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.int" ]
+  }, {
+    "fqn" : "com.example.StringUtils#capitalize",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.String" ]
+  }, {
+    "fqn" : "com.example.Calculator",
+    "type" : "CLASS",
+    "dependencies" : [ ]
+  }, {
+    "fqn" : "com.example.Calculator#add",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.int" ]
+  }, {
+    "fqn" : "com.example.StringUtilsTest#isPalindrome_detectsPalindrome",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.CalculatorTest#add_twoPositives_returnsSum",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.CalculatorTest#divide_byZero_throwsException",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.StringUtils",
+    "type" : "CLASS",
+    "dependencies" : [ ]
+  }, {
+    "fqn" : "com.example.StringUtils#isPalindrome",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.boolean", "com.example.String" ]
+  }, {
+    "fqn" : "com.example.StringUtilsTest",
+    "type" : "CLASS",
+    "dependencies" : [ "org.junit.jupiter.api.Test" ]
+  }, {
+    "fqn" : "com.example.StringUtilsTest#reverse_returnsReversedString",
+    "type" : "METHOD",
+    "dependencies" : [ "com.example.void" ]
+  }, {
+    "fqn" : "com.example.CalculatorTest",
+    "type" : "CLASS",
+    "dependencies" : [ "org.junit.jupiter.api.Test" ]
+  } ]
+}

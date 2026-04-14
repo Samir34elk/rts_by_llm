@@ -6,5 +6,6 @@ include(
     "rts-change",
     "rts-selector",
     "rts-llm",
-    "rts-cli"
+    "rts-cli",
+    "rts-gradle-plugin"
 )
