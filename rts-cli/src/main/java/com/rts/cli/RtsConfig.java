@@ -80,9 +80,9 @@ public class RtsConfig {
     public static class LlmConfig {
         private boolean enabled = false;
         private String provider = "openai";
-        private String endpoint = "${RTS_LLM_ENDPOINT}";
-        private String apiKey = "${RTS_LLM_API_KEY}";
-        private String model = "${RTS_LLM_MODEL:gpt-4o-mini}";
+        private String endpoint = "${RTS_LLM_ENDPOINT:http://localhost:11434}";
+        private String apiKey   = "${RTS_LLM_API_KEY:ollama}";
+        private String model    = "${RTS_LLM_MODEL:qwen2.5-coder:7b}";
         private int maxTokens = 2000;
         private double temperature = 0.1;
 
