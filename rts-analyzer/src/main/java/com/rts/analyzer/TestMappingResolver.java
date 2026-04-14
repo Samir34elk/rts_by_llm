@@ -62,50 +62,61 @@ public class TestMappingResolver implements TestDiscovery {
     );
 
     private final JavaParser parser;
+    private final MultiModuleDetector moduleDetector;
 
     /** Creates a resolver with a default {@link JavaParser} configuration. */
     public TestMappingResolver() {
         this.parser = new JavaParser();
         this.jacocoParser = new JacocoReportParser();
+        this.moduleDetector = new MultiModuleDetector();
     }
 
     /**
-     * Discovers all test cases under {@code src/test/} within the given project root.
+     * Discovers all test cases across all modules of the given project.
      *
-     * <p>Automatically detects a JaCoCo XML report in the project's build output and,
-     * when found, uses it to populate {@code coveredElements} with exact method-level FQNs
-     * ({@code com.example.Foo#bar}) instead of the coarse static heuristic.
+     * <p>Automatically detects Maven and Gradle multi-module structures (via
+     * {@link MultiModuleDetector}) so that tests in every submodule's
+     * {@code src/test/java} are included, not just those at the project root.
      *
-     * @param projectRoot root directory of the project
+     * <p>JaCoCo coverage reports are searched in each module's build output.
+     * If any report is found, method-level FQNs replace the static heuristic.
+     *
+     * @param projectRoot root directory of the project (or a single-module root)
      * @return list of test cases with inferred coverage; never {@code null}
      */
     @Override
     public List<TestCase> discoverTests(Path projectRoot) {
-        Path testRoot = projectRoot.resolve("src/test/java");
-        if (!Files.exists(testRoot)) {
-            log.debug("No src/test/java directory found under {}", projectRoot);
-            return List.of();
-        }
+        List<Path> modules = moduleDetector.detectModules(projectRoot);
 
-        // Load JaCoCo coverage data if available — enables method-level precision
-        Map<String, Set<String>> jacocoCoverage = jacocoParser.findReport(projectRoot)
-                .map(jacocoParser::parse)
-                .orElse(Map.of());
+        // Merge JaCoCo coverage from all modules that have a report
+        Map<String, Set<String>> jacocoCoverage = new java.util.LinkedHashMap<>();
+        for (Path module : modules) {
+            jacocoParser.findReport(module).ifPresent(report ->
+                    jacocoCoverage.putAll(jacocoParser.parse(report)));
+        }
 
         if (!jacocoCoverage.isEmpty()) {
             log.info("Using JaCoCo coverage data: {} classes with method-level coverage", jacocoCoverage.size());
         } else {
-            log.info("No JaCoCo report found — falling back to static heuristic for coverage inference");
+            log.debug("No JaCoCo report found in any module — falling back to static heuristic");
         }
 
         List<TestCase> tests = new ArrayList<>();
-        try (Stream<Path> stream = Files.walk(testRoot)) {
-            stream.filter(p -> p.toString().endsWith(".java"))
-                    .forEach(file -> tests.addAll(extractTestCases(file, jacocoCoverage)));
-        } catch (IOException e) {
-            log.warn("Cannot walk test directory {}: {}", testRoot, e.getMessage());
+        for (Path module : modules) {
+            Path testRoot = module.resolve("src/test/java");
+            if (!Files.exists(testRoot)) {
+                log.debug("No src/test/java found in module {}", module.getFileName());
+                continue;
+            }
+            try (Stream<Path> stream = Files.walk(testRoot)) {
+                stream.filter(p -> p.toString().endsWith(".java"))
+                        .forEach(file -> tests.addAll(extractTestCases(file, jacocoCoverage)));
+            } catch (IOException e) {
+                log.warn("Cannot walk test directory {}: {}", testRoot, e.getMessage());
+            }
         }
-        log.info("Discovered {} test cases under {}", tests.size(), testRoot);
+
+        log.info("Discovered {} test cases across {} module(s)", tests.size(), modules.size());
         return tests;
     }
 
